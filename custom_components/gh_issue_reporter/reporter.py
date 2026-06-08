@@ -27,17 +27,32 @@ Design notes you'd otherwise have to re-derive while reading this:
     in the issue title, which is how the search-based dedup finds prior
     open issues.
 
+  * Two ways to identify which integration to file under:
+      1. **Logger name** — `custom_components.<name>.*` is the simple,
+         direct case. Anything an integration logs via its own `_LOGGER`
+         will land here.
+      2. **Traceback fallback** — HA core's executor catches exceptions
+         from integration callbacks (e.g. a sync lambda passed to
+         `async_track_time_interval` that throws) and logs them on
+         `homeassistant` itself, not on the integration's logger. To
+         still attribute these to the right repo, we walk the traceback
+         and look for the deepest `custom_components/<name>/` frame.
+
   * We must never produce an issue for an error logged by ourselves.
     Doing so would feedback-loop and burn through GitHub rate limits in
     seconds. The handler explicitly drops any record whose logger name
-    is inside this integration's namespace.
+    is inside this integration's namespace, **and** any traceback-based
+    attribution that points at this integration.
 """
 from __future__ import annotations
 
 import logging
+import os
 import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from types import TracebackType
+from typing import Any
 
 from homeassistant.const import __version__ as HA_VERSION
 from homeassistant.core import HomeAssistant
@@ -57,6 +72,15 @@ _LOGGER = logging.getLogger(__name__)
 # with this string must never trigger a report.
 _OWN_LOGGER_PREFIX = f"{CUSTOM_COMPONENT_PREFIX}{DOMAIN}"
 
+# Path-marker substrings used when scanning tracebacks for the originating
+# integration. Cover both unix and windows separators so the fallback works
+# on either host.
+_PATH_MARKERS = (
+    f"{os.sep}custom_components{os.sep}",
+    "/custom_components/",
+    "\\custom_components\\",
+)
+
 
 @dataclass(frozen=True)
 class ErrorEvent:
@@ -74,6 +98,7 @@ class ErrorEvent:
     error_message: str
     traceback_text: str
     timestamp: datetime
+    source: str  # "logger" or "traceback" — how integration was attributed.
 
 
 class GitHubIssueReporter(logging.Handler):
@@ -125,15 +150,29 @@ class GitHubIssueReporter(logging.Handler):
             if not record.exc_info:
                 return
 
+            # Two-step attribution: prefer the logger name (cheap, direct),
+            # fall back to scanning the traceback for a custom_components
+            # frame (handles errors that bubble up to homeassistant core).
+            source = "logger"
             integration = self._integration_from_logger(record.name)
             if integration is None:
+                integration = self._integration_from_traceback(record.exc_info)
+                source = "traceback"
+                if integration is None:
+                    return
+
+            # Second recursion guard: if the traceback fallback resolves to
+            # ourselves, drop the record. Otherwise an error inside this
+            # integration that happens to be logged by HA core (not us)
+            # would loop back through us.
+            if integration == DOMAIN:
                 return
 
             repo = self._integration_repos.get(integration) or self._default_repo
             if not repo:
                 return
 
-            event = self._build_event(record, integration)
+            event = self._build_event(record, integration, source)
 
             # call_soon_threadsafe is the documented way to schedule work on
             # the asyncio loop from a non-loop thread. We use it to call
@@ -159,8 +198,47 @@ class GitHubIssueReporter(logging.Handler):
         return first or None
 
     @staticmethod
+    def _integration_from_traceback(
+        exc_info: tuple[type[BaseException], BaseException, TracebackType]
+        | tuple[None, None, None]
+        | bool
+        | None,
+    ) -> str | None:
+        """Walk the traceback. Return the integration name from the deepest
+        frame whose file lives in a `custom_components/<name>/` directory.
+
+        Returning the *deepest* match (not the outermost) gives us the
+        actual code that raised, not whatever caller happened to wrap it.
+        For errors that pass through HA core's executor, the outer frames
+        are inside `homeassistant/helpers/frame.py`, and the integration
+        frame is the innermost one — that's the one we want to attribute.
+        """
+        if not exc_info or exc_info is True:
+            return None
+        # Mypy/practical: when not bool/None, exc_info is a 3-tuple.
+        if not isinstance(exc_info, tuple) or len(exc_info) != 3:
+            return None
+        tb = exc_info[2]
+        if tb is None:
+            return None
+
+        found: str | None = None
+        while tb is not None:
+            filename = tb.tb_frame.f_code.co_filename or ""
+            marker_idx, marker_len = _find_marker(filename)
+            if marker_idx >= 0:
+                rest = filename[marker_idx + marker_len:]
+                # Take the first path segment as the integration's folder
+                # name. Works whether the path uses / or \ next.
+                name = _first_path_segment(rest)
+                if name:
+                    found = name  # keep walking so deepest wins
+            tb = tb.tb_next
+        return found
+
+    @staticmethod
     def _build_event(
-        record: logging.LogRecord, integration: str
+        record: logging.LogRecord, integration: str, source: str
     ) -> ErrorEvent:
         # `exc_info` is normally a `(type, value, tb)` tuple when set via
         # `logger.error(..., exc_info=...)` or `logger.exception(...)`.
@@ -183,6 +261,7 @@ class GitHubIssueReporter(logging.Handler):
             error_message=err_msg,
             traceback_text=tb_text,
             timestamp=datetime.fromtimestamp(record.created, tz=timezone.utc),
+            source=source,
         )
 
     # ---------------------------------------------------------------
@@ -208,7 +287,7 @@ class GitHubIssueReporter(logging.Handler):
                 comment = (
                     f"Recurrence at `{event.timestamp.isoformat()}` "
                     f"on Home Assistant `{HA_VERSION}` "
-                    f"(logger `{event.logger_name}`)."
+                    f"(logger `{event.logger_name}`, source `{event.source}`)."
                 )
                 await self._client.add_comment(repo, existing, comment)
             else:
@@ -262,7 +341,7 @@ class GitHubIssueReporter(logging.Handler):
         return (
             f"**Automated report from `gh_issue_reporter`.**\n\n"
             f"- **Logger:** `{event.logger_name}`\n"
-            f"- **Integration:** `{event.integration}`\n"
+            f"- **Integration:** `{event.integration}` (attributed via `{event.source}`)\n"
             f"- **Level:** `{event.level}`\n"
             f"- **Error type:** `{event.error_type}`\n"
             f"- **Timestamp (UTC):** `{event.timestamp.isoformat()}`\n"
@@ -272,3 +351,46 @@ class GitHubIssueReporter(logging.Handler):
             f"**Traceback**\n\n"
             f"```pytb\n{event.traceback_text}\n```\n"
         )
+
+
+# ---------------------------------------------------------------------------
+# Helpers used by `_integration_from_traceback`. Kept as module-level pure
+# functions so they're trivial to test in isolation if we ever add tests.
+# ---------------------------------------------------------------------------
+
+
+def _find_marker(path: str) -> tuple[int, int]:
+    """Return (index, marker_length) of the earliest custom_components/
+    marker in `path`, or (-1, 0) if none.
+
+    We try multiple markers because tracebacks captured on Windows can mix
+    separators depending on how a path was constructed.
+    """
+    best_idx = -1
+    best_len = 0
+    for marker in _PATH_MARKERS:
+        idx = path.find(marker)
+        if idx >= 0 and (best_idx == -1 or idx < best_idx):
+            best_idx = idx
+            best_len = len(marker)
+    return best_idx, best_len
+
+
+def _first_path_segment(rest: str) -> str:
+    """Given a string like `helldivers2/__init__.py`, return `helldivers2`.
+
+    Treats both `/` and `\\` as separators. Returns `""` if `rest` is
+    empty or starts with a separator (which would be a malformed match).
+    """
+    if not rest:
+        return ""
+    # Find earliest of either separator.
+    cuts: list[int] = []
+    for sep in ("/", "\\"):
+        idx = rest.find(sep)
+        if idx >= 0:
+            cuts.append(idx)
+    if not cuts:
+        return rest
+    cut = min(cuts)
+    return rest[:cut]
