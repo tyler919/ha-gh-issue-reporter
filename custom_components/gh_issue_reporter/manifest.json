@@ -1,0 +1,12 @@
+{
+  "domain": "gh_issue_reporter",
+  "name": "GitHub Issue Reporter",
+  "documentation": "https://github.com/tyler919/ha-gh-issue-reporter",
+  "issue_tracker": "https://github.com/tyler919/ha-gh-issue-reporter/issues",
+  "codeowners": ["@tyler919"],
+  "dependencies": [],
+  "requirements": [],
+  "iot_class": "cloud_push",
+  "integration_type": "service",
+  "version": "0.1.0"
+}
