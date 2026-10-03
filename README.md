@@ -180,6 +180,12 @@ to the caller immediately.
   up with two issues opened. Subsequent occurrences will then comment on
   whichever the search returns first.
 - No options flow yet — config is via `configuration.yaml` only.
+- HA's global startup timeout (`CancelledError: Global task timeout:
+  Bootstrap stage N timeout`) is **not** reported. It cancels every setup
+  task still running, so it would blame whichever integration was mid-setup
+  rather than the cause. A one-shot warning is logged instead; if you see
+  it, look at the startup log for the slow `Setup of ...` lines. It is
+  still reported if the cancellation lands inside the integration's own code.
 
 ## License
 

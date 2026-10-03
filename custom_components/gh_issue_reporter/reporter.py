@@ -65,6 +65,7 @@ from .const import (
     TITLE_PREFIX,
 )
 from .github_client import GitHubAuthError, GitHubClient
+from .startup_timeout import is_global_startup_timeout
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -130,6 +131,9 @@ class GitHubIssueReporter(logging.Handler):
         # actionable output anyway.
         self._auth_warned = False
 
+        # Same one-shot idea for dropped startup-timeout cancellations.
+        self._startup_timeout_warned = False
+
     # ---------------------------------------------------------------
     # Synchronous side: runs on whatever thread emitted the log record.
     # ---------------------------------------------------------------
@@ -173,6 +177,28 @@ class GitHubIssueReporter(logging.Handler):
                 return
 
             event = self._build_event(record, integration, source)
+
+            # HA's global bootstrap deadline cancels every setup task still
+            # in flight; whichever integration was awaiting core at that
+            # moment gets blamed by the traceback. Not an integration bug,
+            # so don't file it. See startup_timeout.py.
+            if is_global_startup_timeout(
+                event.error_type,
+                event.error_message,
+                _frame_filenames(record.exc_info),
+                integration,
+            ):
+                if not self._startup_timeout_warned:
+                    # Own namespace -> filtered by emit(), no loop.
+                    _LOGGER.warning(
+                        "Not reporting %s (%s): Home Assistant's global "
+                        "startup timeout cancelled it mid-setup. This is a "
+                        "slow-boot symptom, not an integration bug.",
+                        event.error_type,
+                        integration,
+                    )
+                    self._startup_timeout_warned = True
+                return
 
             # call_soon_threadsafe is the documented way to schedule work on
             # the asyncio loop from a non-loop thread. We use it to call
@@ -357,6 +383,18 @@ class GitHubIssueReporter(logging.Handler):
 # Helpers used by `_integration_from_traceback`. Kept as module-level pure
 # functions so they're trivial to test in isolation if we ever add tests.
 # ---------------------------------------------------------------------------
+
+
+def _frame_filenames(exc_info: Any) -> list[str]:
+    """Outermost-first source filenames of the traceback in `exc_info`."""
+    if not isinstance(exc_info, tuple) or len(exc_info) != 3:
+        return []
+    names: list[str] = []
+    tb = exc_info[2]
+    while tb is not None:
+        names.append(tb.tb_frame.f_code.co_filename or "")
+        tb = tb.tb_next
+    return names
 
 
 def _find_marker(path: str) -> tuple[int, int]:
