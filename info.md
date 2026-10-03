@@ -1,7 +1,11 @@
 # GitHub Issue Reporter
 
 Catches errors from your *other* custom integrations and automatically
-files them as GitHub issues — one repo per integration.
+files them as GitHub issues in a repo you choose.
+
+**Use a private repo:** reports include unredacted exception messages and
+tracebacks (LAN IPs, URLs with keys, webhook IDs). The integration warns
+at startup if a target repo is public.
 
 Built for the case where you maintain a handful of personal custom
 integrations and don't want to be hunting through `home-assistant.log`
@@ -30,10 +34,11 @@ gh_issue_reporter:
   token: !secret github_issue_token
   integrations:
     helldivers2:
-      repo: tyler919/ha-helldivers2
+      repo: tyler919/ha-error-reports   # private
     lighting:
-      repo: tyler919/ha-lighting
-  default_repo: tyler919/ha-misc  # optional
+      repo: tyler919/ha-error-reports   # private
+  # default_repo routes errors from EVERY other custom integration
+  # (including third-party HACS ones) into the tracker. Leave unset.
 ```
 
 See the [README](https://github.com/tyler919/ha-gh-issue-reporter#readme)

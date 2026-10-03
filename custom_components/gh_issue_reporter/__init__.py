@@ -23,6 +23,7 @@ from .const import (
 )
 from .github_client import GitHubClient
 from .reporter import GitHubIssueReporter
+from .visibility import warn_public_repos
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -99,6 +100,13 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         root_logger.removeHandler(handler)
 
     hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _remove_handler)
+
+    # Reports are unredacted, so a public target repo publishes them. Check
+    # in the background so a slow or offline GitHub never delays startup.
+    hass.async_create_background_task(
+        warn_public_repos(client, integration_repos, default_repo, _LOGGER),
+        "gh_issue_reporter repo visibility check",
+    )
 
     _LOGGER.info(
         "gh_issue_reporter: watching %d integration(s)%s",
