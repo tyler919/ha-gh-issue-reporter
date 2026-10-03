@@ -1,6 +1,7 @@
 """Minimal async GitHub REST client.
 
-We only need three endpoints:
+We only need four endpoints:
+  * read a repo (to warn at startup if it's public)
   * search open issues by title (for dedup)
   * create an issue
   * add a comment to an existing issue
@@ -46,6 +47,20 @@ class GitHubClient:
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "ha-gh-issue-reporter",
         }
+
+    async def repo_is_private(self, repo: str) -> bool | None:
+        """Return GitHub's `private` flag for the repo, or None if it can't
+        be read (missing, no access, auth failure). Never raises on HTTP
+        status: this is a best-effort startup check, and auth failures are
+        reported by the reporter itself on first use.
+        """
+        url = f"{GITHUB_API}/repos/{repo}"
+        async with self._session.get(url, headers=self._headers()) as resp:
+            if resp.status != 200:
+                _LOGGER.debug("Repo lookup for %s returned %s", repo, resp.status)
+                return None
+            data: dict[str, Any] = await resp.json()
+        return bool(data.get("private"))
 
     async def search_open_issue(
         self, repo: str, title_fingerprint: str

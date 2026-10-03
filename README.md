@@ -4,7 +4,13 @@
 
 A [Home Assistant](https://www.home-assistant.io/) custom integration that
 catches errors from your **other** custom integrations and automatically
-files them as GitHub issues — one repo per integration.
+files them as GitHub issues in a repo you choose.
+
+> **Use a private repo.** Reports contain the raw exception message and
+> full traceback, unredacted: LAN IPs and ports, URLs with API keys or
+> `user:pass@` in them, webhook IDs, third-party API responses, file
+> paths. In a public repo all of that is world-readable. The integration
+> logs a warning at startup for any target repo that is public.
 
 Built for the case where you maintain a handful of personal custom
 integrations and don't want to be hunting through `home-assistant.log`
@@ -57,24 +63,35 @@ Store the GitHub PAT in `secrets.yaml`:
 github_issue_token: ghp_xxxxxxxxxxxxxxxxxxxx
 ```
 
-Then add to `configuration.yaml`:
+Then add to `configuration.yaml`, pointing every integration at a
+**private** repo (one shared private repo is fine):
 
 ```yaml
 gh_issue_reporter:
   token: !secret github_issue_token
   integrations:
     helldivers2:
-      repo: tyler919/ha-helldivers2
+      repo: tyler919/ha-error-reports   # private
     lighting:
-      repo: tyler919/ha-lighting
-  default_repo: tyler919/ha-misc  # optional
+      repo: tyler919/ha-error-reports   # private
 ```
 
 After a restart, you should see this in your log:
 
 ```
-custom_components.gh_issue_reporter: watching 2 integration(s), default_repo=tyler919/ha-misc
+custom_components.gh_issue_reporter: watching 2 integration(s)
 ```
+
+If any target repo is public you'll also get a
+`report repo ... is PUBLIC` warning. Reporting still runs; fix the config.
+
+#### `default_repo`: think before setting it
+
+`default_repo: owner/name` catches errors from **every** custom
+integration not listed under `integrations:`, including HACS installs you
+didn't write and don't control. Their tracebacks (and whatever their
+exception messages contain) all get filed into that repo. Leave it unset
+unless you want that, and if you do set it, it must be private too.
 
 ### Reference
 
@@ -82,7 +99,7 @@ custom_components.gh_issue_reporter: watching 2 integration(s), default_repo=tyl
 | --- | --- | --- |
 | `token` | yes | GitHub PAT. See **Security / PAT setup** below. |
 | `integrations` | no | Map of `<integration name>: { repo: owner/name }`. The integration name is the part after `custom_components.` in the logger. |
-| `default_repo` | no | `owner/name` used when the logger doesn't match any entry under `integrations`. Omit to skip unmapped integrations. |
+| `default_repo` | no | `owner/name` for errors from **any** custom integration not under `integrations`, including third-party HACS ones. Omit (recommended) to skip unmapped integrations. Must be private if set. |
 
 ## Security / PAT setup
 
@@ -92,7 +109,8 @@ You need a GitHub Personal Access Token. Two options:
 <https://github.com/settings/tokens?type=beta>:
 
 - Resource owner: your account.
-- Repository access: **only the repos listed in your config**.
+- Repository access: **Only select repositories** → just the report
+  repo(s) in your config (e.g. `ha-error-reports`).
 - Repository permissions: **Issues → Read and write**. Nothing else.
 - Expiration: pick something reasonable (90d–1y). You'll need to rotate.
 
@@ -180,6 +198,8 @@ to the caller immediately.
   up with two issues opened. Subsequent occurrences will then comment on
   whichever the search returns first.
 - No options flow yet — config is via `configuration.yaml` only.
+- Reports are not redacted. Keep target repos private (see the top of
+  this README).
 - HA's global startup timeout (`CancelledError: Global task timeout:
   Bootstrap stage N timeout`) is **not** reported. It cancels every setup
   task still running, so it would blame whichever integration was mid-setup
